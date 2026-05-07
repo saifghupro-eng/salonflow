@@ -27,9 +27,10 @@ export default function PageReservation() {
   const [emailErreur, setEmailErreur] = useState('')
   const [etape, setEtape] = useState<'choix' | 'form' | 'confirme'>('choix')
   const [chargement, setChargement] = useState(false)
-
-  const jours = Array.from({ length: 7 }, (_, i) => addDays(new Date(), i))
-
+  const [semaineOffset, setSemaineOffset] = useState(0)
+  const jours = Array.from({ length: 7 }, (_, i) =>
+    addDays(new Date(), semaineOffset * 7 + i)
+  )
   useEffect(() => { chargerCreneaux() }, [jourSelectionne, serviceChoisi])
 
   async function chargerCreneaux() {
@@ -187,9 +188,26 @@ export default function PageReservation() {
         </section>
 
         {/* Jour */}
-        <section className="bg-white rounded-2xl p-5 mb-4 border border-stone-200">
-          <h2 className="text-sm font-medium text-stone-500 mb-3">Jour</h2>
-          <div className="flex gap-2 overflow-x-auto pb-1">
+       <section className="bg-white rounded-2xl p-5 mb-4 border border-stone-200">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-medium text-stone-500">Jour</h2>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setSemaineOffset(o => Math.max(0, o - 1))}
+              disabled={semaineOffset === 0}
+              className="text-xs px-2 py-1 rounded-lg border border-stone-200 text-stone-500 disabled:opacity-30 hover:border-stone-400"
+            >
+              ← Sem. préc.
+            </button>
+            <button
+              onClick={() => setSemaineOffset(o => o + 1)}
+              className="text-xs px-2 py-1 rounded-lg border border-stone-200 text-stone-500 hover:border-stone-400"
+            >
+              Sem. suiv. →
+            </button>
+          </div>
+        </div>
+        <div className="flex gap-2 overflow-x-auto pb-1">
             {jours.map(jour => (
               <button
                 key={jour.toISOString()}
