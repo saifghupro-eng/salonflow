@@ -15,6 +15,14 @@ export type Horaire = {
   est_ferme: boolean
 }
 
+export type Coiffeur = {
+  id: string
+  salon_id: string
+  nom: string
+  couleur: string
+  actif: boolean
+}
+
 export type RendezVous = {
   id: string
   salon_id: string
@@ -25,9 +33,12 @@ export type RendezVous = {
   duree_minutes: number
   date_heure: string
   statut: string
+  coiffeur_id: string | null
+  coiffeur_nom: string | null
 }
 
 export type Creneau = {
   heure: string
   disponible: boolean
+  coiffeur_id?: string
 }

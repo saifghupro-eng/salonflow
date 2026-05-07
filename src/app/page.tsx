@@ -1,8 +1,8 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '@/lib/supabase'
-import { Creneau } from '@/lib/types'
+import { Creneau, Coiffeur } from '@/lib/types'
 import { format, addDays, startOfDay } from 'date-fns'
 import { fr } from 'date-fns/locale'
 
@@ -23,85 +23,137 @@ export default function PageReservation() {
   const [creneaux, setCreneaux] = useState<Creneau[]>([])
   const [creneauChoisi, setCreneauChoisi] = useState<string | null>(null)
   const [serviceChoisi, setServiceChoisi] = useState(SERVICES[0])
+  const [coiffeurs, setCoiffeurs] = useState<Coiffeur[]>([])
+  const [coiffeurChoisi, setCoiffeurChoisi] = useState<string>('auto')
   const [form, setForm] = useState({ nom: '', email: '', telephone: '' })
   const [emailErreur, setEmailErreur] = useState('')
   const [etape, setEtape] = useState<'choix' | 'form' | 'confirme'>('choix')
   const [chargement, setChargement] = useState(false)
+  const [confirmationData, setConfirmationData] = useState<{
+    nom: string; email: string; service: string; heure: string; coiffeur: string; jour: Date
+  } | null>(null)
+
   const [semaineOffset, setSemaineOffset] = useState(0)
   const jours = Array.from({ length: 7 }, (_, i) =>
     addDays(new Date(), semaineOffset * 7 + i)
   )
-  useEffect(() => { chargerCreneaux() }, [jourSelectionne, serviceChoisi])
 
-  async function chargerCreneaux() {
+  useEffect(() => { chargerCoiffeurs() }, [])
+  
+  const chargerCreneaux = useCallback(async () => {
     const debut = startOfDay(jourSelectionne)
     const fin = addDays(debut, 1)
-    const jourSemaine = (jourSelectionne.getDay() + 6) % 7 // 0=lundi
+    const jourSemaine = (jourSelectionne.getDay() + 6) % 7
 
-    // Récupérer les horaires du salon pour ce jour
     const { data: horaireJour } = await supabase
-      .from('horaires')
-      .select('*')
+      .from('horaires').select('*')
       .eq('salon_id', SALON_ID)
       .eq('jour_semaine', jourSemaine)
       .single()
 
-    // Si fermé ou pas d'horaire → aucun créneau
-    if (!horaireJour || horaireJour.est_ferme) {
-      setCreneaux([])
-      return
-    }
+    if (!horaireJour || horaireJour.est_ferme) { setCreneaux([]); return }
 
     const [hOuvre] = horaireJour.heure_ouverture.split(':').map(Number)
     const [hFerme] = horaireJour.heure_fermeture.split(':').map(Number)
 
-    // Récupérer les RDV existants
     const { data: rdvExistants } = await supabase
-      .from('rendez_vous')
-      .select('date_heure, duree_minutes')
+      .from('rendez_vous').select('date_heure, duree_minutes, coiffeur_id')
       .eq('salon_id', SALON_ID)
       .gte('date_heure', debut.toISOString())
       .lt('date_heure', fin.toISOString())
       .eq('statut', 'confirme')
 
+    const { data: coiffeursActifs } = await supabase
+      .from('coiffeurs').select('id')
+      .eq('salon_id', SALON_ID)
+      .eq('actif', true)
+
+    const nbCoiffeurs = coiffeursActifs?.length || 1
+
     const creneauxGeneres: Creneau[] = []
     for (let h = hOuvre; h < hFerme; h++) {
       for (let m = 0; m < 60; m += 30) {
-        // Ne pas afficher si le créneau + durée dépasse la fermeture
         const finCreneau = h + (m + serviceChoisi.duree) / 60
         if (finCreneau > hFerme) continue
 
         const heure = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`
         const dateHeure = new Date(jourSelectionne)
         dateHeure.setHours(h, m, 0, 0)
-
-        // Ne pas afficher les créneaux passés
         if (dateHeure < new Date()) continue
 
-        const occupe = (rdvExistants || []).some(rdv => {
+        // Compter combien de coiffeurs sont occupés sur ce créneau
+        const rdvSurCreneau = (rdvExistants || []).filter(rdv => {
           const debutRdv = new Date(rdv.date_heure)
           const finRdv = new Date(debutRdv.getTime() + rdv.duree_minutes * 60000)
           const finNouveauRdv = new Date(dateHeure.getTime() + serviceChoisi.duree * 60000)
           return dateHeure < finRdv && finNouveauRdv > debutRdv
         })
 
-        creneauxGeneres.push({ heure, disponible: !occupe })
+        // Si coiffeur spécifique choisi, vérifier sa dispo
+        let disponible = false
+        if (coiffeurChoisi !== 'auto') {
+          disponible = !rdvSurCreneau.some(r => r.coiffeur_id === coiffeurChoisi)
+        } else {
+          disponible = rdvSurCreneau.length < nbCoiffeurs
+        }
+
+        creneauxGeneres.push({ heure, disponible })
       }
     }
     setCreneaux(creneauxGeneres)
+  }, [jourSelectionne, serviceChoisi, coiffeurChoisi])
+
+  useEffect(() => { chargerCreneaux() }, [chargerCreneaux])
+
+  async function chargerCoiffeurs() {
+    const { data } = await supabase
+      .from('coiffeurs').select('*')
+      .eq('salon_id', SALON_ID)
+      .eq('actif', true)
+    setCoiffeurs(data || [])
   }
 
   async function confirmerReservation() {
     if (!creneauChoisi || !form.nom || !form.email) return
-    if (!isEmailValide(form.email)) {
-      setEmailErreur('Veuillez entrer un email valide')
-      return
-    }
+    if (!isEmailValide(form.email)) { setEmailErreur('Veuillez entrer un email valide'); return }
     setChargement(true)
 
     const [h, m] = creneauChoisi.split(':').map(Number)
     const dateHeure = new Date(jourSelectionne)
     dateHeure.setHours(h, m, 0, 0)
+
+    // Choisir le coiffeur automatiquement si besoin
+    let coiffeurId = coiffeurChoisi !== 'auto' ? coiffeurChoisi : null
+    let coiffeurNom = coiffeurs.find(c => c.id === coiffeurId)?.nom || null
+
+    if (coiffeurChoisi === 'auto') {
+      // Trouver le coiffeur avec le moins de RDV aujourd'hui
+      const debutJour = startOfDay(dateHeure)
+      const finJour = addDays(debutJour, 1)
+      const { data: rdvsJour } = await supabase
+        .from('rendez_vous').select('coiffeur_id')
+        .eq('salon_id', SALON_ID)
+        .gte('date_heure', debutJour.toISOString())
+        .lt('date_heure', finJour.toISOString())
+        .eq('statut', 'confirme')
+
+      const compteParCoiffeur = coiffeurs.reduce((acc, c) => {
+        acc[c.id] = (rdvsJour || []).filter(r => r.coiffeur_id === c.id).length
+        return acc
+      }, {} as Record<string, number>)
+
+      const coiffeurDisponible = coiffeurs
+        .filter(c => {
+          // Vérifier que ce coiffeur n'est pas déjà pris sur ce créneau
+          return true
+        })
+        .sort((a, b) => (compteParCoiffeur[a.id] || 0) - (compteParCoiffeur[b.id] || 0))[0]
+
+      if (coiffeurDisponible) {
+        coiffeurId = coiffeurDisponible.id
+        coiffeurNom = coiffeurDisponible.nom
+      }
+    }
 
     const { error } = await supabase.from('rendez_vous').insert({
       salon_id: SALON_ID,
@@ -112,6 +164,8 @@ export default function PageReservation() {
       duree_minutes: serviceChoisi.duree,
       date_heure: dateHeure.toISOString(),
       statut: 'confirme',
+      coiffeur_id: coiffeurId,
+      coiffeur_nom: coiffeurNom,
     })
 
     if (!error) {
@@ -123,14 +177,31 @@ export default function PageReservation() {
           client_email: form.email,
           service: serviceChoisi.nom,
           date_heure: dateHeure.toISOString(),
+          coiffeur_nom: coiffeurNom,
         }),
+      })
+      setConfirmationData({
+        nom: form.nom,
+        email: form.email,
+        service: serviceChoisi.nom,
+        heure: creneauChoisi,
+        coiffeur: coiffeurNom || 'Au choix du salon',
+        jour: new Date(jourSelectionne),
       })
       setEtape('confirme')
     }
     setChargement(false)
   }
 
-  if (etape === 'confirme') {
+  function reset() {
+    setEtape('choix')
+    setCreneauChoisi(null)
+    setForm({ nom: '', email: '', telephone: '' })
+    setEmailErreur('')
+    chargerCreneaux() // ← recharge les créneaux après réservation
+  }
+
+  if (etape === 'confirme' && confirmationData) {
     return (
       <main className="min-h-screen bg-stone-50 flex items-center justify-center p-4">
         <div className="bg-white rounded-2xl p-8 max-w-md w-full text-center border border-stone-200">
@@ -140,17 +211,15 @@ export default function PageReservation() {
             </svg>
           </div>
           <h1 className="text-xl font-medium text-stone-800 mb-2">Réservation confirmée !</h1>
-          <p className="text-stone-500 text-sm mb-1">Un email de confirmation a été envoyé à</p>
-          <p className="font-medium text-stone-700 mb-6">{form.email}</p>
-          <div className="bg-stone-50 rounded-xl p-4 text-left text-sm text-stone-600 space-y-1">
-            <p><span className="font-medium">Service :</span> {serviceChoisi.nom}</p>
-            <p><span className="font-medium">Date :</span> {format(jourSelectionne, 'EEEE d MMMM', { locale: fr })}</p>
-            <p><span className="font-medium">Heure :</span> {creneauChoisi}</p>
+          <p className="text-stone-500 text-sm mb-1">Un email a été envoyé à</p>
+          <p className="font-medium text-stone-700 mb-6">{confirmationData.email}</p>
+          <div className="bg-stone-50 rounded-xl p-4 text-left text-sm text-stone-600 space-y-2">
+            <p><span className="font-medium">Service :</span> {confirmationData.service}</p>
+            <p><span className="font-medium">Date :</span> {format(confirmationData.jour, 'EEEE d MMMM', { locale: fr })}</p>
+            <p><span className="font-medium">Heure :</span> {confirmationData.heure}</p>
+            <p><span className="font-medium">Coiffeur :</span> {confirmationData.coiffeur}</p>
           </div>
-          <button
-            onClick={() => { setEtape('choix'); setCreneauChoisi(null); setForm({ nom: '', email: '', telephone: '' }) }}
-            className="mt-6 text-sm text-stone-400 underline"
-          >
+          <button onClick={reset} className="mt-6 text-sm text-stone-400 underline">
             Faire une autre réservation
           </button>
         </div>
@@ -171,15 +240,12 @@ export default function PageReservation() {
           <h2 className="text-sm font-medium text-stone-500 mb-3">Service</h2>
           <div className="grid grid-cols-2 gap-2">
             {SERVICES.map(s => (
-              <button
-                key={s.nom}
-                onClick={() => { setServiceChoisi(s); setCreneauChoisi(null); setEtape('choix') }}
+              <button key={s.nom} onClick={() => { setServiceChoisi(s); setCreneauChoisi(null); setEtape('choix') }}
                 className={`p-3 rounded-xl text-left text-sm border transition-all ${
                   serviceChoisi.nom === s.nom
                     ? 'border-stone-800 bg-stone-800 text-white'
                     : 'border-stone-200 text-stone-600 hover:border-stone-400'
-                }`}
-              >
+                }`}>
                 <div className="font-medium">{s.nom}</div>
                 <div className="text-xs opacity-60 mt-0.5">{s.duree} min</div>
               </button>
@@ -187,8 +253,38 @@ export default function PageReservation() {
           </div>
         </section>
 
+        {/* Coiffeur */}
+        {coiffeurs.length > 0 && (
+          <section className="bg-white rounded-2xl p-5 mb-4 border border-stone-200">
+            <h2 className="text-sm font-medium text-stone-500 mb-3">Coiffeur</h2>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => { setCoiffeurChoisi('auto'); setCreneauChoisi(null) }}
+                className={`px-4 py-2 rounded-xl text-sm border transition-all ${
+                  coiffeurChoisi === 'auto'
+                    ? 'border-stone-800 bg-stone-800 text-white'
+                    : 'border-stone-200 text-stone-600 hover:border-stone-400'
+                }`}>
+                Sans préférence
+              </button>
+              {coiffeurs.map(c => (
+                <button key={c.id}
+                  onClick={() => { setCoiffeurChoisi(c.id); setCreneauChoisi(null) }}
+                  className={`px-4 py-2 rounded-xl text-sm border transition-all flex items-center gap-2 ${
+                    coiffeurChoisi === c.id
+                      ? 'border-stone-800 bg-stone-800 text-white'
+                      : 'border-stone-200 text-stone-600 hover:border-stone-400'
+                  }`}>
+                  <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: c.couleur }} />
+                  {c.nom}
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+
         {/* Jour */}
-       <section className="bg-white rounded-2xl p-5 mb-4 border border-stone-200">
+             <section className="bg-white rounded-2xl p-5 mb-4 border border-stone-200">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-medium text-stone-500">Jour</h2>
           <div className="flex gap-2">
@@ -228,20 +324,18 @@ export default function PageReservation() {
         {/* Créneaux */}
         <section className="bg-white rounded-2xl p-5 mb-4 border border-stone-200">
           <h2 className="text-sm font-medium text-stone-500 mb-3">Créneau</h2>
-          {creneaux.length === 0 ? (
+          {creneaux.filter(c => c.disponible).length === 0 ? (
             <p className="text-sm text-stone-400 text-center py-4">Aucun créneau disponible ce jour</p>
           ) : (
             <div className="grid grid-cols-4 gap-2">
               {creneaux.filter(c => c.disponible).map(c => (
-                <button
-                  key={c.heure}
+                <button key={c.heure}
                   onClick={() => { setCreneauChoisi(c.heure); setEtape('form') }}
                   className={`p-2 rounded-xl text-sm border transition-all ${
                     creneauChoisi === c.heure
                       ? 'border-stone-800 bg-stone-800 text-white'
                       : 'border-stone-200 text-stone-600 hover:border-stone-400'
-                  }`}
-                >
+                  }`}>
                   {c.heure}
                 </button>
               ))}
@@ -254,47 +348,24 @@ export default function PageReservation() {
           <section className="bg-white rounded-2xl p-5 mb-4 border border-stone-200">
             <h2 className="text-sm font-medium text-stone-500 mb-3">Vos coordonnées</h2>
             <div className="space-y-3">
-              <input
-                type="text"
-                placeholder="Votre prénom et nom"
-                value={form.nom}
+              <input type="text" placeholder="Votre prénom et nom" value={form.nom}
                 onChange={e => setForm({ ...form, nom: e.target.value })}
-                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 outline-none focus:border-stone-400"
-              />
+                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 outline-none focus:border-stone-400" />
               <div>
-                <input
-                  type="email"
-                  placeholder="Votre email"
-                  value={form.email}
-                  onChange={e => {
-                    setForm({ ...form, email: e.target.value })
-                    setEmailErreur('')
-                  }}
-                  onBlur={() => {
-                    if (form.email && !isEmailValide(form.email)) {
-                      setEmailErreur('Veuillez entrer un email valide')
-                    }
-                  }}
+                <input type="email" placeholder="Votre email" value={form.email}
+                  onChange={e => { setForm({ ...form, email: e.target.value }); setEmailErreur('') }}
+                  onBlur={() => { if (form.email && !isEmailValide(form.email)) setEmailErreur('Email invalide') }}
                   className={`w-full border rounded-xl px-4 py-3 text-sm text-stone-700 outline-none transition-colors ${
-                    emailErreur ? 'border-red-300 focus:border-red-400' : 'border-stone-200 focus:border-stone-400'
-                  }`}
-                />
-                {emailErreur && (
-                  <p className="text-xs text-red-400 mt-1 ml-1">{emailErreur}</p>
-                )}
+                    emailErreur ? 'border-red-300' : 'border-stone-200 focus:border-stone-400'
+                  }`} />
+                {emailErreur && <p className="text-xs text-red-400 mt-1 ml-1">{emailErreur}</p>}
               </div>
-              <input
-                type="tel"
-                placeholder="Votre téléphone (optionnel)"
-                value={form.telephone}
+              <input type="tel" placeholder="Téléphone (optionnel)" value={form.telephone}
                 onChange={e => setForm({ ...form, telephone: e.target.value })}
-                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 outline-none focus:border-stone-400"
-              />
-              <button
-                onClick={confirmerReservation}
+                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 outline-none focus:border-stone-400" />
+              <button onClick={confirmerReservation}
                 disabled={chargement || !form.nom || !form.email || !!emailErreur}
-                className="w-full bg-stone-800 text-white rounded-xl py-3 text-sm font-medium disabled:opacity-40 hover:bg-stone-700 transition-colors"
-              >
+                className="w-full bg-stone-800 text-white rounded-xl py-3 text-sm font-medium disabled:opacity-40 hover:bg-stone-700 transition-colors">
                 {chargement ? 'Envoi en cours...' : 'Confirmer la réservation'}
               </button>
             </div>
