@@ -42,3 +42,12 @@ export type Creneau = {
   disponible: boolean
   coiffeur_id?: string
 }
+
+export type jours_off_coiffeur = {
+  id: string
+  coiffeur_id: string | null
+  salon_id: string
+  date: string
+  raison: string
+  created_at: string
+}

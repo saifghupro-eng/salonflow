@@ -72,6 +72,14 @@ export default function PageReservation() {
       .eq('salon_id', SALON_ID)
       .eq('jour_semaine', jourSemaine)
 
+    // Jours de congé — FIX BUG 1
+    const dateStr = format(jourSelectionne, 'yyyy-MM-dd')
+    const { data: joursOff } = await supabase
+      .from('jours_off_coiffeur').select('coiffeur_id')
+      .eq('salon_id', SALON_ID)
+      .eq('date', dateStr)
+    const coiffeursEnConge = new Set((joursOff || []).map(j => j.coiffeur_id))
+
     // RDV existants
     const { data: rdvExistants } = await supabase
       .from('rendez_vous').select('date_heure, duree_minutes, coiffeur_id')
@@ -99,14 +107,24 @@ export default function PageReservation() {
         const coiffeursDispos: string[] = []
 
         for (const coiffeur of listeCoiffeurs) {
-          // Vérifier si le coiffeur travaille à cette heure (créneau perso ou horaire salon)
-          const creneauPerso = creneauxPerso?.find(cp => cp.coiffeur_id === coiffeur.id)
+          // FIX BUG 1 — Ignorer les coiffeurs en congé
+          if (coiffeursEnConge.has(coiffeur.id)) continue
+
+          // FIX BUG 2 — Prendre TOUS les créneaux du coiffeur ce jour (pas juste le premier)
+          const creneauxDuCoiffeur = (creneauxPerso || []).filter(
+            cp => cp.coiffeur_id === coiffeur.id
+          )
           let coiffeurTravaille = true
 
-          if (creneauPerso) {
-            const [hDebut] = creneauPerso.heure_debut.split(':').map(Number)
-            const [hFin] = creneauPerso.heure_fin.split(':').map(Number)
-            coiffeurTravaille = h >= hDebut && finCreneau <= hFin
+          if (creneauxDuCoiffeur.length > 0) {
+            const rdvDebutMin = h * 60 + m
+            const rdvFinMin = rdvDebutMin + serviceChoisi.duree
+            // Le coiffeur travaille si AU MOINS UN de ses créneaux couvre le RDV complet
+            coiffeurTravaille = creneauxDuCoiffeur.some(cp => {
+              const debutMin = parseInt(cp.heure_debut.split(':')[0]) * 60 + parseInt(cp.heure_debut.split(':')[1])
+              const finMin = parseInt(cp.heure_fin.split(':')[0]) * 60 + parseInt(cp.heure_fin.split(':')[1])
+              return rdvDebutMin >= debutMin && rdvFinMin <= finMin
+            })
           }
 
           if (!coiffeurTravaille) continue
@@ -238,7 +256,8 @@ export default function PageReservation() {
 
   if (etape === 'confirme' && confirmationData) {
     return (
-      <main className="min-h-screen bg-stone-50 flex items-center justify-center p-4">
+      <main className="min-h-screen bg-stone-50 flex items-center justify-center p-4" style={{ fontFamily: "'Noto Sans', sans-serif" }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Noto+Sans:wght@300;400;500;600&display=swap');`}</style>
         <div className="bg-white rounded-2xl p-8 max-w-md w-full text-center border border-stone-200">
           <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
             <svg className="w-8 h-8 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -263,7 +282,8 @@ export default function PageReservation() {
   }
 
   return (
-    <main className="min-h-screen bg-stone-50 p-4">
+    <main className="min-h-screen bg-stone-50 p-4" style={{ fontFamily: "'Noto Sans', sans-serif" }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Noto+Sans:wght@300;400;500;600&display=swap');`}</style>
       <div className="max-w-lg mx-auto">
         <div className="mb-8 pt-6">
           <h1 className="text-2xl font-medium text-stone-800">Prendre rendez-vous</h1>
