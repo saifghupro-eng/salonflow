@@ -18,9 +18,16 @@ function isEmailValide(email: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
 }
 
+type CreneauAvecDispo = {
+  heure: string
+  slots: number        // nb de coiffeurs dispo sur ce créneau
+  total: number        // nb total de coiffeurs actifs
+  coiffeursDispos: string[]  // ids des coiffeurs disponibles
+}
+
 export default function PageReservation() {
   const [jourSelectionne, setJourSelectionne] = useState<Date>(new Date())
-  const [creneaux, setCreneaux] = useState<Creneau[]>([])
+  const [creneaux, setCreneaux] = useState<CreneauAvecDispo[]>([])
   const [creneauChoisi, setCreneauChoisi] = useState<string | null>(null)
   const [serviceChoisi, setServiceChoisi] = useState(SERVICES[0])
   const [coiffeurs, setCoiffeurs] = useState<Coiffeur[]>([])
@@ -34,17 +41,15 @@ export default function PageReservation() {
   } | null>(null)
 
   const [semaineOffset, setSemaineOffset] = useState(0)
-  const jours = Array.from({ length: 7 }, (_, i) =>
-    addDays(new Date(), semaineOffset * 7 + i)
-  )
-
+  const jours = Array.from({ length: 7 }, (_, i) => addDays(new Date(), semaineOffset * 7 + i))
   useEffect(() => { chargerCoiffeurs() }, [])
-  
+
   const chargerCreneaux = useCallback(async () => {
     const debut = startOfDay(jourSelectionne)
     const fin = addDays(debut, 1)
     const jourSemaine = (jourSelectionne.getDay() + 6) % 7
 
+    // Horaires du salon ce jour
     const { data: horaireJour } = await supabase
       .from('horaires').select('*')
       .eq('salon_id', SALON_ID)
@@ -53,9 +58,21 @@ export default function PageReservation() {
 
     if (!horaireJour || horaireJour.est_ferme) { setCreneaux([]); return }
 
-    const [hOuvre] = horaireJour.heure_ouverture.split(':').map(Number)
-    const [hFerme] = horaireJour.heure_fermeture.split(':').map(Number)
+    // Coiffeurs actifs
+    const { data: coiffeursActifs } = await supabase
+      .from('coiffeurs').select('*')
+      .eq('salon_id', SALON_ID)
+      .eq('actif', true)
 
+    const listeCoiffeurs = coiffeursActifs || []
+
+    // Créneaux personnalisés par coiffeur pour ce jour
+    const { data: creneauxPerso } = await supabase
+      .from('creneaux_coiffeur').select('*')
+      .eq('salon_id', SALON_ID)
+      .eq('jour_semaine', jourSemaine)
+
+    // RDV existants
     const { data: rdvExistants } = await supabase
       .from('rendez_vous').select('date_heure, duree_minutes, coiffeur_id')
       .eq('salon_id', SALON_ID)
@@ -63,14 +80,11 @@ export default function PageReservation() {
       .lt('date_heure', fin.toISOString())
       .eq('statut', 'confirme')
 
-    const { data: coiffeursActifs } = await supabase
-      .from('coiffeurs').select('id')
-      .eq('salon_id', SALON_ID)
-      .eq('actif', true)
+    const [hOuvre] = horaireJour.heure_ouverture.split(':').map(Number)
+    const [hFerme] = horaireJour.heure_fermeture.split(':').map(Number)
 
-    const nbCoiffeurs = coiffeursActifs?.length || 1
+    const creneauxGeneres: CreneauAvecDispo[] = []
 
-    const creneauxGeneres: Creneau[] = []
     for (let h = hOuvre; h < hFerme; h++) {
       for (let m = 0; m < 60; m += 30) {
         const finCreneau = h + (m + serviceChoisi.duree) / 60
@@ -81,53 +95,79 @@ export default function PageReservation() {
         dateHeure.setHours(h, m, 0, 0)
         if (dateHeure < new Date()) continue
 
-        // Compter combien de coiffeurs sont occupés sur ce créneau
-        const rdvSurCreneau = (rdvExistants || []).filter(rdv => {
-          const debutRdv = new Date(rdv.date_heure)
-          const finRdv = new Date(debutRdv.getTime() + rdv.duree_minutes * 60000)
-          const finNouveauRdv = new Date(dateHeure.getTime() + serviceChoisi.duree * 60000)
-          return dateHeure < finRdv && finNouveauRdv > debutRdv
-        })
+        // Pour chaque coiffeur, vérifier sa dispo sur ce créneau
+        const coiffeursDispos: string[] = []
 
-        // Si coiffeur spécifique choisi, vérifier sa dispo
-        let disponible = false
-        if (coiffeurChoisi !== 'auto') {
-          disponible = !rdvSurCreneau.some(r => r.coiffeur_id === coiffeurChoisi)
-        } else {
-          disponible = rdvSurCreneau.length < nbCoiffeurs
+        for (const coiffeur of listeCoiffeurs) {
+          // Vérifier si le coiffeur travaille à cette heure (créneau perso ou horaire salon)
+          const creneauPerso = creneauxPerso?.find(cp => cp.coiffeur_id === coiffeur.id)
+          let coiffeurTravaille = true
+
+          if (creneauPerso) {
+            const [hDebut] = creneauPerso.heure_debut.split(':').map(Number)
+            const [hFin] = creneauPerso.heure_fin.split(':').map(Number)
+            coiffeurTravaille = h >= hDebut && finCreneau <= hFin
+          }
+
+          if (!coiffeurTravaille) continue
+
+          // Vérifier qu'il n'a pas de RDV qui chevauche
+          const occupe = (rdvExistants || []).some(rdv => {
+            if (rdv.coiffeur_id !== coiffeur.id) return false
+            const debutRdv = new Date(rdv.date_heure)
+            const finRdv = new Date(debutRdv.getTime() + rdv.duree_minutes * 60000)
+            const finNouveauRdv = new Date(dateHeure.getTime() + serviceChoisi.duree * 60000)
+            return dateHeure < finRdv && finNouveauRdv > debutRdv
+          })
+
+          if (!occupe) coiffeursDispos.push(coiffeur.id)
         }
 
-        creneauxGeneres.push({ heure, disponible })
+        // Si coiffeur spécifique choisi
+        let slotsDispos = coiffeursDispos.length
+        if (coiffeurChoisi !== 'auto') {
+          slotsDispos = coiffeursDispos.includes(coiffeurChoisi) ? 1 : 0
+        }
+
+        creneauxGeneres.push({
+          heure,
+          slots: slotsDispos,
+          total: listeCoiffeurs.length,
+          coiffeursDispos,
+        })
       }
     }
+
     setCreneaux(creneauxGeneres)
   }, [jourSelectionne, serviceChoisi, coiffeurChoisi])
 
   useEffect(() => { chargerCreneaux() }, [chargerCreneaux])
 
   async function chargerCoiffeurs() {
-    const { data } = await supabase
-      .from('coiffeurs').select('*')
-      .eq('salon_id', SALON_ID)
-      .eq('actif', true)
+    const { data } = await supabase.from('coiffeurs').select('*').eq('salon_id', SALON_ID).eq('actif', true)
     setCoiffeurs(data || [])
   }
 
   async function confirmerReservation() {
     if (!creneauChoisi || !form.nom || !form.email) return
-    if (!isEmailValide(form.email)) { setEmailErreur('Veuillez entrer un email valide'); return }
+    if (!isEmailValide(form.email)) { setEmailErreur('Email invalide'); return }
     setChargement(true)
 
     const [h, m] = creneauChoisi.split(':').map(Number)
     const dateHeure = new Date(jourSelectionne)
     dateHeure.setHours(h, m, 0, 0)
 
-    // Choisir le coiffeur automatiquement si besoin
-    let coiffeurId = coiffeurChoisi !== 'auto' ? coiffeurChoisi : null
-    let coiffeurNom = coiffeurs.find(c => c.id === coiffeurId)?.nom || null
+    const creneau = creneaux.find(c => c.heure === creneauChoisi)
 
-    if (coiffeurChoisi === 'auto') {
-      // Trouver le coiffeur avec le moins de RDV aujourd'hui
+    // Choisir le coiffeur
+    let coiffeurId: string | null = null
+    let coiffeurNom: string | null = null
+
+    if (coiffeurChoisi !== 'auto') {
+      coiffeurId = coiffeurChoisi
+      coiffeurNom = coiffeurs.find(c => c.id === coiffeurChoisi)?.nom || null
+    } else if (creneau && creneau.coiffeursDispos.length > 0) {
+      // Prendre le coiffeur avec le moins de RDV aujourd'hui
       const debutJour = startOfDay(dateHeure)
       const finJour = addDays(debutJour, 1)
       const { data: rdvsJour } = await supabase
@@ -142,16 +182,13 @@ export default function PageReservation() {
         return acc
       }, {} as Record<string, number>)
 
-      const coiffeurDisponible = coiffeurs
-        .filter(c => {
-          // Vérifier que ce coiffeur n'est pas déjà pris sur ce créneau
-          return true
-        })
-        .sort((a, b) => (compteParCoiffeur[a.id] || 0) - (compteParCoiffeur[b.id] || 0))[0]
+      const meilleurCoiffeur = creneau.coiffeursDispos
+        .map(id => ({ id, count: compteParCoiffeur[id] || 0 }))
+        .sort((a, b) => a.count - b.count)[0]
 
-      if (coiffeurDisponible) {
-        coiffeurId = coiffeurDisponible.id
-        coiffeurNom = coiffeurDisponible.nom
+      if (meilleurCoiffeur) {
+        coiffeurId = meilleurCoiffeur.id
+        coiffeurNom = coiffeurs.find(c => c.id === meilleurCoiffeur.id)?.nom || null
       }
     }
 
@@ -181,10 +218,8 @@ export default function PageReservation() {
         }),
       })
       setConfirmationData({
-        nom: form.nom,
-        email: form.email,
-        service: serviceChoisi.nom,
-        heure: creneauChoisi,
+        nom: form.nom, email: form.email,
+        service: serviceChoisi.nom, heure: creneauChoisi,
         coiffeur: coiffeurNom || 'Au choix du salon',
         jour: new Date(jourSelectionne),
       })
@@ -198,7 +233,7 @@ export default function PageReservation() {
     setCreneauChoisi(null)
     setForm({ nom: '', email: '', telephone: '' })
     setEmailErreur('')
-    chargerCreneaux() // ← recharge les créneaux après réservation
+    chargerCreneaux()
   }
 
   if (etape === 'confirme' && confirmationData) {
@@ -240,7 +275,8 @@ export default function PageReservation() {
           <h2 className="text-sm font-medium text-stone-500 mb-3">Service</h2>
           <div className="grid grid-cols-2 gap-2">
             {SERVICES.map(s => (
-              <button key={s.nom} onClick={() => { setServiceChoisi(s); setCreneauChoisi(null); setEtape('choix') }}
+              <button key={s.nom}
+                onClick={() => { setServiceChoisi(s); setCreneauChoisi(null); setEtape('choix') }}
                 className={`p-3 rounded-xl text-left text-sm border transition-all ${
                   serviceChoisi.nom === s.nom
                     ? 'border-stone-800 bg-stone-800 text-white'
@@ -258,8 +294,7 @@ export default function PageReservation() {
           <section className="bg-white rounded-2xl p-5 mb-4 border border-stone-200">
             <h2 className="text-sm font-medium text-stone-500 mb-3">Coiffeur</h2>
             <div className="flex flex-wrap gap-2">
-              <button
-                onClick={() => { setCoiffeurChoisi('auto'); setCreneauChoisi(null) }}
+              <button onClick={() => { setCoiffeurChoisi('auto'); setCreneauChoisi(null) }}
                 className={`px-4 py-2 rounded-xl text-sm border transition-all ${
                   coiffeurChoisi === 'auto'
                     ? 'border-stone-800 bg-stone-800 text-white'
@@ -268,8 +303,7 @@ export default function PageReservation() {
                 Sans préférence
               </button>
               {coiffeurs.map(c => (
-                <button key={c.id}
-                  onClick={() => { setCoiffeurChoisi(c.id); setCreneauChoisi(null) }}
+                <button key={c.id} onClick={() => { setCoiffeurChoisi(c.id); setCreneauChoisi(null) }}
                   className={`px-4 py-2 rounded-xl text-sm border transition-all flex items-center gap-2 ${
                     coiffeurChoisi === c.id
                       ? 'border-stone-800 bg-stone-800 text-white'
@@ -283,62 +317,84 @@ export default function PageReservation() {
           </section>
         )}
 
-        {/* Jour */}
-             <section className="bg-white rounded-2xl p-5 mb-4 border border-stone-200">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-medium text-stone-500">Jour</h2>
-          <div className="flex gap-2">
+       {/* Jour */}
+        <section className="bg-white rounded-2xl p-5 mb-4 border border-stone-200">
+          <h2 className="text-sm font-medium text-stone-500 mb-3">Jour</h2>
+
+          {/* Navigation semaine */}
+          <div className="flex items-center justify-between mb-3">
             <button
-              onClick={() => setSemaineOffset(o => Math.max(0, o - 1))}
+              onClick={() => { setSemaineOffset(o => Math.max(0, o - 1)); setCreneauChoisi(null) }}
               disabled={semaineOffset === 0}
-              className="text-xs px-2 py-1 rounded-lg border border-stone-200 text-stone-500 disabled:opacity-30 hover:border-stone-400"
-            >
-              ← Sem. préc.
+              className="text-xs text-stone-500 border border-stone-200 rounded-lg px-3 py-1.5 hover:bg-stone-50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
+              ← Préc.
             </button>
+            <span className="text-xs text-stone-400">
+              {semaineOffset === 0 ? 'Cette semaine' : semaineOffset === 1 ? 'Semaine prochaine' : `Dans ${semaineOffset} semaines`}
+            </span>
             <button
-              onClick={() => setSemaineOffset(o => o + 1)}
-              className="text-xs px-2 py-1 rounded-lg border border-stone-200 text-stone-500 hover:border-stone-400"
-            >
-              Sem. suiv. →
+              onClick={() => { setSemaineOffset(o => Math.min(o + 1, 8)); setCreneauChoisi(null) }}
+              disabled={semaineOffset >= 8}
+              className="text-xs text-stone-500 border border-stone-200 rounded-lg px-3 py-1.5 hover:bg-stone-50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
+              Suiv. →
             </button>
           </div>
-        </div>
-        <div className="flex gap-2 overflow-x-auto pb-1">
+
+          {/* Jours */}
+          <div className="flex gap-2 overflow-x-auto pb-1">
             {jours.map(jour => (
-              <button
-                key={jour.toISOString()}
+              <button key={jour.toISOString()}
                 onClick={() => { setJourSelectionne(jour); setCreneauChoisi(null); setEtape('choix') }}
                 className={`flex-shrink-0 flex flex-col items-center p-3 rounded-xl text-sm border transition-all w-14 ${
                   format(jour, 'yyyy-MM-dd') === format(jourSelectionne, 'yyyy-MM-dd')
                     ? 'border-stone-800 bg-stone-800 text-white'
                     : 'border-stone-200 text-stone-600 hover:border-stone-400'
-                }`}
-              >
+                }`}>
                 <span className="text-xs opacity-60">{format(jour, 'EEE', { locale: fr })}</span>
                 <span className="font-medium mt-0.5">{format(jour, 'd')}</span>
+                <span className="text-xs opacity-40">{format(jour, 'MMM', { locale: fr })}</span>
               </button>
             ))}
           </div>
         </section>
 
-        {/* Créneaux */}
+        {/* Créneaux avec slots */}
         <section className="bg-white rounded-2xl p-5 mb-4 border border-stone-200">
           <h2 className="text-sm font-medium text-stone-500 mb-3">Créneau</h2>
-          {creneaux.filter(c => c.disponible).length === 0 ? (
+          {creneaux.length === 0 ? (
             <p className="text-sm text-stone-400 text-center py-4">Aucun créneau disponible ce jour</p>
           ) : (
             <div className="grid grid-cols-4 gap-2">
-              {creneaux.filter(c => c.disponible).map(c => (
-                <button key={c.heure}
-                  onClick={() => { setCreneauChoisi(c.heure); setEtape('form') }}
-                  className={`p-2 rounded-xl text-sm border transition-all ${
-                    creneauChoisi === c.heure
-                      ? 'border-stone-800 bg-stone-800 text-white'
-                      : 'border-stone-200 text-stone-600 hover:border-stone-400'
-                  }`}>
-                  {c.heure}
-                </button>
-              ))}
+              {creneaux.map(c => {
+                const plein = c.slots === 0
+                const selectionne = creneauChoisi === c.heure
+
+                return (
+                  <button key={c.heure}
+                    disabled={plein}
+                    onClick={() => { if (!plein) { setCreneauChoisi(c.heure); setEtape('form') } }}
+                    className={`p-2 rounded-xl text-sm border transition-all relative ${
+                      plein
+                        ? 'border-stone-100 text-stone-300 cursor-not-allowed bg-stone-50'
+                        : selectionne
+                        ? 'border-stone-800 bg-stone-800 text-white'
+                        : 'border-stone-200 text-stone-600 hover:border-stone-400'
+                    }`}>
+                    <span className={plein ? 'line-through' : ''}>{c.heure}</span>
+                    {/* Indicateur de slots restants en mode "sans préférence" */}
+                    {coiffeurChoisi === 'auto' && !plein && c.slots < c.total && (
+                      <span className={`block text-xs mt-0.5 ${selectionne ? 'text-white opacity-70' : 'text-stone-400'}`}>
+                        {c.slots} dispo
+                      </span>
+                    )}
+                    {coiffeurChoisi === 'auto' && !plein && c.slots === c.total && (
+                      <span className={`block text-xs mt-0.5 ${selectionne ? 'text-white opacity-70' : 'text-green-500'}`}>
+                        libre
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
             </div>
           )}
         </section>
@@ -350,19 +406,19 @@ export default function PageReservation() {
             <div className="space-y-3">
               <input type="text" placeholder="Votre prénom et nom" value={form.nom}
                 onChange={e => setForm({ ...form, nom: e.target.value })}
-                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 outline-none focus:border-stone-400" />
+                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 bg-white outline-none focus:border-stone-400 placeholder:text-stone-400" />
               <div>
                 <input type="email" placeholder="Votre email" value={form.email}
                   onChange={e => { setForm({ ...form, email: e.target.value }); setEmailErreur('') }}
                   onBlur={() => { if (form.email && !isEmailValide(form.email)) setEmailErreur('Email invalide') }}
-                  className={`w-full border rounded-xl px-4 py-3 text-sm text-stone-700 outline-none transition-colors ${
+                  className={`w-full border rounded-xl px-4 py-3 text-sm text-stone-700 bg-white outline-none transition-colors placeholder:text-stone-400 ${
                     emailErreur ? 'border-red-300' : 'border-stone-200 focus:border-stone-400'
                   }`} />
                 {emailErreur && <p className="text-xs text-red-400 mt-1 ml-1">{emailErreur}</p>}
               </div>
               <input type="tel" placeholder="Téléphone (optionnel)" value={form.telephone}
                 onChange={e => setForm({ ...form, telephone: e.target.value })}
-                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 outline-none focus:border-stone-400" />
+                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 bg-white outline-none focus:border-stone-400 placeholder:text-stone-400" />
               <button onClick={confirmerReservation}
                 disabled={chargement || !form.nom || !form.email || !!emailErreur}
                 className="w-full bg-stone-800 text-white rounded-xl py-3 text-sm font-medium disabled:opacity-40 hover:bg-stone-700 transition-colors">

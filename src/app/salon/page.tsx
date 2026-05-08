@@ -26,11 +26,20 @@ const MESSAGES_AUTO = [
 ]
 
 type VueType = 'semaine' | 'jour'
-type OngletType = 'agenda' | 'nouveau' | 'horaires' | 'coiffeurs'
+type OngletType = 'agenda' | 'horaires' | 'coiffeurs'
+
+type CreneauCoiffeur = {
+  id: string
+  coiffeur_id: string
+  jour_semaine: number
+  heure_debut: string
+  heure_fin: string
+}
 
 export default function TableauBordSalon() {
   const [rdvs, setRdvs] = useState<RendezVous[]>([])
   const [coiffeurs, setCoiffeurs] = useState<Coiffeur[]>([])
+  const [creneauxCoiffeurs, setCreneauxCoiffeurs] = useState<CreneauCoiffeur[]>([])
   const [semaine, setSemaine] = useState<Date>(new Date())
   const [jourSelectionne, setJourSelectionne] = useState<Date>(new Date())
   const [vue, setVue] = useState<VueType>('semaine')
@@ -43,14 +52,18 @@ export default function TableauBordSalon() {
     }))
   )
 
-  // Modal RDV info
+  // Modal RDV info / annulation / transfert
   const [rdvSelectionne, setRdvSelectionne] = useState<RendezVous | null>(null)
-  const [modeAnnulation, setModeAnnulation] = useState(false)
+  const [modeModal, setModeModal] = useState<'info' | 'annulation' | 'transfert'>('info')
   const [messagePreset, setMessagePreset] = useState(MESSAGES_AUTO[0])
   const [messagePersonnalise, setMessagePersonnalise] = useState('')
   const [annulationChargement, setAnnulationChargement] = useState(false)
+  const [transfertCoiffeurId, setTransfertCoiffeurId] = useState('')
+  const [transfertDate, setTransfertDate] = useState('')
+  const [transfertHeure, setTransfertHeure] = useState('')
+  const [transfertChargement, setTransfertChargement] = useState(false)
 
-  // Modal nouveau RDV (depuis calendrier)
+  // Modal nouveau RDV depuis calendrier
   const [nouveauRdvModal, setNouveauRdvModal] = useState<{ jour: Date; heure: string } | null>(null)
   const [nouveauRdv, setNouveauRdv] = useState({
     client_nom: '', client_email: '', client_telephone: '',
@@ -62,10 +75,19 @@ export default function TableauBordSalon() {
   const [nouveauCoiffeur, setNouveauCoiffeur] = useState({ nom: '', couleur: '#6366f1' })
   const [coiffeurEnvoi, setCoiffeurEnvoi] = useState<'idle' | 'chargement' | 'ok'>('idle')
 
+  // Créneaux spécifiques coiffeur
+  const [coiffeurEdite, setCoiffeurEdite] = useState<string>('')
+  const [nouveauCreneau, setNouveauCreneau] = useState({ jour_semaine: 0, heure_debut: '09:00', heure_fin: '18:00' })
+  const [creneauEnvoi, setCreneauEnvoi] = useState<'idle' | 'chargement' | 'ok'>('idle')
+
   const aujourdhui = new Date()
   const debutSemaine = startOfWeek(semaine, { weekStartsOn: 1 })
   const finSemaine = endOfWeek(semaine, { weekStartsOn: 1 })
   const joursSemaine = eachDayOfInterval({ start: debutSemaine, end: finSemaine })
+
+  const rdvsFiltres = filtreCoiffeur === 'tous'
+    ? rdvs
+    : rdvs.filter(r => r.coiffeur_id === filtreCoiffeur)
 
   const chargerRdvs = useCallback(async () => {
     setChargement(true)
@@ -83,7 +105,7 @@ export default function TableauBordSalon() {
   }, [vue, semaine, jourSelectionne])
 
   useEffect(() => { chargerRdvs() }, [chargerRdvs])
-  useEffect(() => { chargerCoiffeurs(); chargerHoraires() }, [])
+  useEffect(() => { chargerCoiffeurs(); chargerHoraires(); chargerCreneauxCoiffeurs() }, [])
 
   async function chargerCoiffeurs() {
     const { data } = await supabase.from('coiffeurs').select('*').eq('salon_id', SALON_ID).eq('actif', true)
@@ -93,6 +115,11 @@ export default function TableauBordSalon() {
   async function chargerHoraires() {
     const { data } = await supabase.from('horaires').select('*').eq('salon_id', SALON_ID)
     if (data && data.length > 0) setHoraires(data)
+  }
+
+  async function chargerCreneauxCoiffeurs() {
+    const { data } = await supabase.from('creneaux_coiffeur').select('*').eq('salon_id', SALON_ID)
+    setCreneauxCoiffeurs(data || [])
   }
 
   async function sauvegarderHoraires() {
@@ -113,8 +140,27 @@ export default function TableauBordSalon() {
   }
 
   async function supprimerCoiffeur(id: string) {
+    if (!confirm('Supprimer ce coiffeur ?')) return
     await supabase.from('coiffeurs').update({ actif: false }).eq('id', id)
     chargerCoiffeurs()
+  }
+
+  async function ajouterCreneauCoiffeur() {
+    if (!coiffeurEdite) return
+    setCreneauEnvoi('chargement')
+    await supabase.from('creneaux_coiffeur').upsert({
+      coiffeur_id: coiffeurEdite,
+      salon_id: SALON_ID,
+      ...nouveauCreneau,
+    })
+    setCreneauEnvoi('ok')
+    chargerCreneauxCoiffeurs()
+    setTimeout(() => setCreneauEnvoi('idle'), 2000)
+  }
+
+  async function supprimerCreneauCoiffeur(id: string) {
+    await supabase.from('creneaux_coiffeur').delete().eq('id', id)
+    chargerCreneauxCoiffeurs()
   }
 
   async function confirmerAnnulation() {
@@ -134,10 +180,44 @@ export default function TableauBordSalon() {
       }),
     })
     setRdvSelectionne(null)
-    setModeAnnulation(false)
+    setModeModal('info')
     setAnnulationChargement(false)
     chargerRdvs()
   }
+
+async function confirmerTransfert() {
+  if (!rdvSelectionne || !transfertDate || !transfertHeure) return
+  setTransfertChargement(true)
+  const [h, m] = transfertHeure.split(':').map(Number)
+  const nouvelleDateHeure = new Date(transfertDate)
+  nouvelleDateHeure.setHours(h, m, 0, 0)
+  const coiffeur = coiffeurs.find(c => c.id === transfertCoiffeurId)
+
+  await supabase.from('rendez_vous').update({
+    date_heure: nouvelleDateHeure.toISOString(),
+    coiffeur_id: transfertCoiffeurId || null,
+    coiffeur_nom: coiffeur?.nom || null,
+  }).eq('id', rdvSelectionne.id)
+
+  // Notifier le client par email
+  await fetch('/api/email-transfert', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      client_nom: rdvSelectionne.client_nom,
+      client_email: rdvSelectionne.client_email,
+      service: rdvSelectionne.service,
+      ancienne_date_heure: rdvSelectionne.date_heure,
+      nouvelle_date_heure: nouvelleDateHeure.toISOString(),
+      coiffeur_nom: coiffeur?.nom || null,
+    }),
+  })
+
+  setRdvSelectionne(null)
+  setModeModal('info')
+  setTransfertChargement(false)
+  chargerRdvs()
+}
 
   async function ajouterRdvDepuisCalendrier() {
     if (!nouveauRdvModal || !nouveauRdv.client_nom) return
@@ -145,7 +225,6 @@ export default function TableauBordSalon() {
     const [h, m] = nouveauRdvModal.heure.split(':').map(Number)
     const dateHeure = new Date(nouveauRdvModal.jour)
     dateHeure.setHours(h, m, 0, 0)
-
     const coiffeur = coiffeurs.find(c => c.id === nouveauRdv.coiffeur_id)
     await supabase.from('rendez_vous').insert({
       salon_id: SALON_ID,
@@ -154,7 +233,6 @@ export default function TableauBordSalon() {
       date_heure: dateHeure.toISOString(),
       statut: 'confirme',
     })
-
     if (nouveauRdv.client_email) {
       await fetch('/api/email-confirmation', {
         method: 'POST',
@@ -168,7 +246,6 @@ export default function TableauBordSalon() {
         }),
       })
     }
-
     setRdvEnvoi('ok')
     setTimeout(() => {
       setNouveauRdvModal(null)
@@ -204,6 +281,8 @@ export default function TableauBordSalon() {
     return format(date, 'EEEE d MMM', { locale: fr })
   }
 
+  // Stats filtrées selon le filtre coiffeur
+  const rdvsStats = rdvsFiltres
   const joursAffichage = vue === 'semaine' ? joursSemaine : [jourSelectionne]
 
   return (
@@ -217,7 +296,6 @@ export default function TableauBordSalon() {
             <p className="text-stone-400 text-xs">Salon Éclat</p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            {/* Onglets */}
             <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
               {(['agenda', 'horaires', 'coiffeurs'] as const).map(o => (
                 <button key={o} onClick={() => setOnglet(o)}
@@ -238,11 +316,8 @@ export default function TableauBordSalon() {
       {/* AGENDA */}
       {onglet === 'agenda' && (
         <div className="max-w-7xl mx-auto p-4">
-
-          {/* Contrôles agenda */}
           <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
             <div className="flex items-center gap-2">
-              {/* Vue semaine/jour */}
               <div className="flex gap-1 bg-white border border-stone-200 p-1 rounded-xl">
                 {(['semaine', 'jour'] as const).map(v => (
                   <button key={v} onClick={() => setVue(v)}
@@ -253,8 +328,6 @@ export default function TableauBordSalon() {
                   </button>
                 ))}
               </div>
-
-              {/* Navigation */}
               {vue === 'semaine' ? (
                 <>
                   <button onClick={() => setSemaine(s => addDays(s, -7))}
@@ -269,9 +342,7 @@ export default function TableauBordSalon() {
                 <>
                   <button onClick={() => setJourSelectionne(d => addDays(d, -1))}
                     className="text-xs text-stone-500 border border-stone-200 bg-white rounded-xl px-3 py-2 hover:bg-stone-50">← Préc.</button>
-                  <span className="text-xs font-medium text-stone-600 capitalize">
-                    {labelJour(jourSelectionne)}
-                  </span>
+                  <span className="text-xs font-medium text-stone-600 capitalize">{labelJour(jourSelectionne)}</span>
                   <button onClick={() => setJourSelectionne(d => addDays(d, 1))}
                     className="text-xs text-stone-500 border border-stone-200 bg-white rounded-xl px-3 py-2 hover:bg-stone-50">Suiv. →</button>
                 </>
@@ -349,7 +420,14 @@ export default function TableauBordSalon() {
                         )}
                         {rdvsCreneau.map(rdv => (
                           <button key={rdv.id}
-                            onClick={e => { e.stopPropagation(); setRdvSelectionne(rdv); setModeAnnulation(false) }}
+                            onClick={e => {
+                              e.stopPropagation()
+                              setRdvSelectionne(rdv)
+                              setModeModal('info')
+                              setTransfertCoiffeurId(rdv.coiffeur_id || '')
+                              setTransfertDate(format(new Date(rdv.date_heure), 'yyyy-MM-dd'))
+                              setTransfertHeure(format(new Date(rdv.date_heure), 'HH:mm'))
+                            }}
                             className="w-full text-left px-2 py-1.5 rounded-lg text-xs text-white transition-all hover:opacity-80 mb-0.5"
                             style={{ background: couleurCoiffeur(rdv.coiffeur_id) }}>
                             <p className="font-medium truncate">{rdv.client_nom}</p>
@@ -365,21 +443,23 @@ export default function TableauBordSalon() {
             </div>
           </div>
 
-          {/* Stats */}
+          {/* Stats filtrées */}
           <div className="grid grid-cols-3 gap-3 mt-4">
             <div className="bg-white rounded-xl p-4 border border-stone-200">
-              <p className="text-2xl font-semibold text-stone-800">{rdvs.length}</p>
-              <p className="text-xs text-stone-400 mt-1">{vue === 'semaine' ? 'RDV cette semaine' : 'RDV ce jour'}</p>
+              <p className="text-2xl font-semibold text-stone-800">{rdvsStats.length}</p>
+              <p className="text-xs text-stone-400 mt-1">
+                {filtreCoiffeur !== 'tous' ? `RDV — ${coiffeurs.find(c => c.id === filtreCoiffeur)?.nom}` : vue === 'semaine' ? 'RDV cette semaine' : 'RDV ce jour'}
+              </p>
             </div>
             <div className="bg-white rounded-xl p-4 border border-stone-200">
               <p className="text-2xl font-semibold text-stone-800">
-                {rdvs.filter(r => format(new Date(r.date_heure), 'yyyy-MM-dd') === format(aujourdhui, 'yyyy-MM-dd')).length}
+                {rdvsStats.filter(r => format(new Date(r.date_heure), 'yyyy-MM-dd') === format(aujourdhui, 'yyyy-MM-dd')).length}
               </p>
               <p className="text-xs text-stone-400 mt-1">RDV aujourd'hui</p>
             </div>
             <div className="bg-white rounded-xl p-4 border border-stone-200">
               <p className="text-2xl font-semibold text-stone-800">
-                {Math.round(rdvs.reduce((a, r) => a + r.duree_minutes, 0) / 60 * 10) / 10}h
+                {Math.round(rdvsStats.reduce((a, r) => a + r.duree_minutes, 0) / 60 * 10) / 10}h
               </p>
               <p className="text-xs text-stone-400 mt-1">Temps total</p>
             </div>
@@ -391,21 +471,23 @@ export default function TableauBordSalon() {
       {onglet === 'horaires' && (
         <div className="max-w-md mx-auto p-4">
           <div className="bg-white rounded-2xl p-5 border border-stone-200">
-            <h2 className="text-sm font-medium text-stone-500 mb-4">Horaires d'ouverture</h2>
+            <h2 className="text-sm font-medium text-stone-700 mb-4">Horaires d'ouverture</h2>
             <div className="space-y-3">
               {horaires.map((h, i) => (
                 <div key={i} className="flex items-center gap-2">
-                  <span className="text-sm text-stone-600 w-16 flex-shrink-0">{JOURS[i]}</span>
-                  <input type="time" value={h.heure_ouverture} disabled={h.est_ferme}
+                  <span className="text-sm text-stone-700 w-16 flex-shrink-0">{JOURS[i]}</span>
+                  <input type="time" value={h.heure_ouverture}
+                    disabled={h.est_ferme}
                     onChange={e => { const u = [...horaires]; u[i] = { ...u[i], heure_ouverture: e.target.value }; setHoraires(u) }}
-                    className="border border-stone-200 rounded-lg px-2 py-1.5 text-sm disabled:opacity-30 w-24" />
+                    className="border border-stone-200 rounded-lg px-2 py-1.5 text-sm text-stone-700 disabled:opacity-30 disabled:bg-stone-50 w-24" />
                   <span className="text-stone-300">→</span>
-                  <input type="time" value={h.heure_fermeture} disabled={h.est_ferme}
+                  <input type="time" value={h.heure_fermeture}
+                    disabled={h.est_ferme}
                     onChange={e => { const u = [...horaires]; u[i] = { ...u[i], heure_fermeture: e.target.value }; setHoraires(u) }}
-                    className="border border-stone-200 rounded-lg px-2 py-1.5 text-sm disabled:opacity-30 w-24" />
+                    className="border border-stone-200 rounded-lg px-2 py-1.5 text-sm text-stone-700 disabled:opacity-30 disabled:bg-stone-50 w-24" />
                   <button onClick={() => { const u = [...horaires]; u[i] = { ...u[i], est_ferme: !u[i].est_ferme }; setHoraires(u) }}
                     className={`text-xs px-2 py-1.5 rounded-lg border transition-all ${
-                      h.est_ferme ? 'border-red-200 bg-red-50 text-red-500' : 'border-stone-200 text-stone-500'
+                      h.est_ferme ? 'border-red-200 bg-red-50 text-red-500' : 'border-stone-200 bg-white text-stone-600 hover:border-stone-400'
                     }`}>
                     {h.est_ferme ? 'Fermé' : 'Ouvert'}
                   </button>
@@ -422,39 +504,102 @@ export default function TableauBordSalon() {
 
       {/* COIFFEURS */}
       {onglet === 'coiffeurs' && (
-        <div className="max-w-md mx-auto p-4 space-y-4">
+        <div className="max-w-2xl mx-auto p-4 space-y-4">
+
+          {/* Liste coiffeurs */}
           <div className="bg-white rounded-2xl p-5 border border-stone-200">
-            <h2 className="text-sm font-medium text-stone-500 mb-4">Coiffeurs actifs</h2>
+            <h2 className="text-sm font-medium text-stone-700 mb-4">Coiffeurs actifs</h2>
             {coiffeurs.length === 0 ? (
               <p className="text-sm text-stone-400 text-center py-4">Aucun coiffeur</p>
             ) : (
               <div className="space-y-2">
                 {coiffeurs.map(c => (
-                  <div key={c.id} className="flex items-center justify-between p-3 bg-stone-50 rounded-xl">
-                    <div className="flex items-center gap-3">
-                      <span className="w-4 h-4 rounded-full flex-shrink-0" style={{ background: c.couleur }} />
-                      <span className="text-sm font-medium text-stone-700">{c.nom}</span>
+                  <div key={c.id}>
+                    <div className="flex items-center justify-between p-3 bg-stone-50 rounded-xl">
+                      <div className="flex items-center gap-3">
+                        <span className="w-4 h-4 rounded-full flex-shrink-0" style={{ background: c.couleur }} />
+                        <span className="text-sm font-medium text-stone-700">{c.nom}</span>
+                        <span className="text-xs text-stone-400">
+                          {creneauxCoiffeurs.filter(cc => cc.coiffeur_id === c.id).length} créneau(x) perso
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => setCoiffeurEdite(coiffeurEdite === c.id ? '' : c.id)}
+                          className={`text-xs px-2 py-1 rounded-lg border transition-all ${
+                            coiffeurEdite === c.id
+                              ? 'bg-stone-800 text-white border-stone-800'
+                              : 'border-stone-200 text-stone-500 hover:border-stone-400'
+                          }`}>
+                          {coiffeurEdite === c.id ? 'Fermer' : 'Créneaux'}
+                        </button>
+                        <button onClick={() => supprimerCoiffeur(c.id)}
+                          className="text-xs text-red-400 hover:text-red-600">Supprimer</button>
+                      </div>
                     </div>
-                    <button onClick={() => supprimerCoiffeur(c.id)}
-                      className="text-xs text-red-400 hover:text-red-600">Supprimer</button>
+
+                    {/* Créneaux spécifiques de ce coiffeur */}
+                    {coiffeurEdite === c.id && (
+                      <div className="mt-2 ml-4 p-4 bg-stone-50 rounded-xl border border-stone-100 space-y-3">
+                        <p className="text-xs font-medium text-stone-500">Créneaux spécifiques de {c.nom}</p>
+
+                        {/* Créneaux existants */}
+                        {creneauxCoiffeurs.filter(cc => cc.coiffeur_id === c.id).length === 0 ? (
+                          <p className="text-xs text-stone-400">Aucun créneau personnalisé — utilise les horaires du salon</p>
+                        ) : (
+                          <div className="space-y-1">
+                            {creneauxCoiffeurs.filter(cc => cc.coiffeur_id === c.id).map(cc => (
+                              <div key={cc.id} className="flex items-center justify-between bg-white rounded-lg px-3 py-2">
+                                <span className="text-xs text-stone-600">
+                                  {JOURS[cc.jour_semaine]} : {cc.heure_debut} → {cc.heure_fin}
+                                </span>
+                                <button onClick={() => supprimerCreneauCoiffeur(cc.id)}
+                                  className="text-xs text-red-400 hover:text-red-600">✕</button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Ajouter un créneau */}
+                        <div className="flex items-center gap-2 flex-wrap pt-1">
+                          <select value={nouveauCreneau.jour_semaine}
+                            onChange={e => setNouveauCreneau({ ...nouveauCreneau, jour_semaine: Number(e.target.value) })}
+                            className="border border-stone-200 rounded-lg px-2 py-1.5 text-xs text-stone-700 bg-white outline-none focus:border-stone-400">
+                            {JOURS.map((j, i) => <option key={i} value={i}>{j}</option>)}
+                          </select>
+                          <input type="time" value={nouveauCreneau.heure_debut}
+                            onChange={e => setNouveauCreneau({ ...nouveauCreneau, heure_debut: e.target.value })}
+                            className="border border-stone-200 rounded-lg px-2 py-1.5 text-xs text-stone-700 bg-white outline-none focus:border-stone-400 w-24" />
+                          <span className="text-stone-300 text-xs">→</span>
+                          <input type="time" value={nouveauCreneau.heure_fin}
+                            onChange={e => setNouveauCreneau({ ...nouveauCreneau, heure_fin: e.target.value })}
+                            className="border border-stone-200 rounded-lg px-2 py-1.5 text-xs text-stone-700 bg-white outline-none focus:border-stone-400 w-24" />
+                          <button onClick={ajouterCreneauCoiffeur}
+                            disabled={creneauEnvoi === 'chargement'}
+                            className="text-xs bg-stone-800 text-white px-3 py-1.5 rounded-lg hover:bg-stone-700 disabled:opacity-40 transition-colors">
+                            {creneauEnvoi === 'ok' ? '✓' : '+ Ajouter'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
             )}
           </div>
 
+          {/* Ajouter coiffeur */}
           <div className="bg-white rounded-2xl p-5 border border-stone-200">
-            <h2 className="text-sm font-medium text-stone-500 mb-4">Ajouter un coiffeur</h2>
+            <h2 className="text-sm font-medium text-stone-700 mb-4">Ajouter un coiffeur</h2>
             <div className="space-y-3">
               <input type="text" placeholder="Prénom du coiffeur" value={nouveauCoiffeur.nom}
                 onChange={e => setNouveauCoiffeur({ ...nouveauCoiffeur, nom: e.target.value })}
-                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm outline-none focus:border-stone-400" />
+                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 bg-white outline-none focus:border-stone-400 placeholder:text-stone-400" />
               <div className="flex items-center gap-3">
-                <label className="text-xs text-stone-400">Couleur dans l'agenda :</label>
+                <label className="text-xs text-stone-500">Couleur dans l'agenda :</label>
                 <input type="color" value={nouveauCoiffeur.couleur}
                   onChange={e => setNouveauCoiffeur({ ...nouveauCoiffeur, couleur: e.target.value })}
-                  className="w-10 h-10 rounded-lg border border-stone-200 cursor-pointer p-0.5" />
-                <span className="text-xs text-stone-400">{nouveauCoiffeur.couleur}</span>
+                  className="w-10 h-10 rounded-lg border border-stone-200 cursor-pointer p-0.5 bg-white" />
+                <span className="text-xs text-stone-500">{nouveauCoiffeur.couleur}</span>
               </div>
               <button onClick={ajouterCoiffeur}
                 disabled={!nouveauCoiffeur.nom || coiffeurEnvoi === 'chargement'}
@@ -466,11 +611,13 @@ export default function TableauBordSalon() {
         </div>
       )}
 
-      {/* MODAL INFO RDV */}
+      {/* MODAL INFO / ANNULATION / TRANSFERT RDV */}
       {rdvSelectionne && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl p-6 max-w-sm w-full border border-stone-200">
-            {!modeAnnulation ? (
+          <div className="bg-white rounded-2xl p-6 max-w-sm w-full border border-stone-200 max-h-[90vh] overflow-y-auto">
+
+            {/* MODE INFO */}
+            {modeModal === 'info' && (
               <>
                 <div className="flex items-start justify-between mb-4">
                   <div>
@@ -508,14 +655,74 @@ export default function TableauBordSalon() {
                     </div>
                   )}
                 </div>
-                <button onClick={() => setModeAnnulation(true)}
-                  className="w-full bg-red-50 text-red-500 border border-red-200 rounded-xl py-2.5 text-sm font-medium hover:bg-red-100 transition-colors">
-                  Annuler ce rendez-vous
-                </button>
+                <div className="flex flex-col gap-2">
+                  <button onClick={() => setModeModal('transfert')}
+                    className="w-full bg-stone-100 text-stone-700 border border-stone-200 rounded-xl py-2.5 text-sm font-medium hover:bg-stone-200 transition-colors">
+                    Déplacer / Réassigner
+                  </button>
+                  <button onClick={() => setModeModal('annulation')}
+                    className="w-full bg-red-50 text-red-500 border border-red-200 rounded-xl py-2.5 text-sm font-medium hover:bg-red-100 transition-colors">
+                    Annuler ce rendez-vous
+                  </button>
+                </div>
               </>
-            ) : (
+            )}
+
+            {/* MODE TRANSFERT */}
+            {modeModal === 'transfert' && (
               <>
-                <h3 className="font-medium text-stone-800 mb-1">Motif d'annulation</h3>
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="font-medium text-stone-800">Déplacer / Réassigner</h3>
+                  <button onClick={() => setModeModal('info')} className="text-stone-300 hover:text-stone-500 text-lg leading-none">✕</button>
+                </div>
+                <p className="text-xs text-stone-400 mb-4">{rdvSelectionne.client_nom} — {rdvSelectionne.service}</p>
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-xs text-stone-500 mb-1 block">Coiffeur</label>
+                    <select value={transfertCoiffeurId}
+                      onChange={e => setTransfertCoiffeurId(e.target.value)}
+                      className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 bg-white outline-none focus:border-stone-400">
+                      <option value="">Sans préférence</option>
+                      {coiffeurs.map(c => <option key={c.id} value={c.id}>{c.nom}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs text-stone-500 mb-1 block">Nouvelle date</label>
+                    <input type="date" value={transfertDate}
+                      min={format(aujourdhui, 'yyyy-MM-dd')}
+                      onChange={e => setTransfertDate(e.target.value)}
+                      className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 bg-white outline-none focus:border-stone-400" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-stone-500 mb-1 block">Nouvelle heure</label>
+                    <select value={transfertHeure}
+                      onChange={e => setTransfertHeure(e.target.value)}
+                      className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 bg-white outline-none focus:border-stone-400">
+                      {HEURES.map(h => <option key={h} value={h}>{h}</option>)}
+                    </select>
+                  </div>
+                  <div className="flex gap-2 pt-1">
+                    <button onClick={() => setModeModal('info')}
+                      className="flex-1 border border-stone-200 text-stone-600 rounded-xl py-2.5 text-sm hover:bg-stone-50">
+                      Retour
+                    </button>
+                    <button onClick={confirmerTransfert}
+                      disabled={!transfertDate || !transfertHeure || transfertChargement}
+                      className="flex-1 bg-stone-800 text-white rounded-xl py-2.5 text-sm font-medium hover:bg-stone-700 disabled:opacity-40">
+                      {transfertChargement ? 'Enregistrement...' : 'Confirmer'}
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* MODE ANNULATION */}
+            {modeModal === 'annulation' && (
+              <>
+                <div className="flex items-center justify-between mb-1">
+                  <h3 className="font-medium text-stone-800">Motif d'annulation</h3>
+                  <button onClick={() => setModeModal('info')} className="text-stone-300 hover:text-stone-500 text-lg leading-none">✕</button>
+                </div>
                 <p className="text-xs text-stone-400 mb-4">Un email sera envoyé à {rdvSelectionne.client_email}</p>
                 <div className="space-y-2 mb-4">
                   {MESSAGES_AUTO.map(msg => (
@@ -523,21 +730,23 @@ export default function TableauBordSalon() {
                       className={`w-full text-left text-xs px-3 py-2.5 rounded-xl border transition-all ${
                         messagePreset === msg
                           ? 'border-stone-800 bg-stone-800 text-white'
-                          : 'border-stone-200 text-stone-600 hover:border-stone-400'
+                          : 'border-stone-200 bg-white text-stone-600 hover:border-stone-400'
                       }`}>
                       {msg}
                     </button>
                   ))}
                 </div>
                 {messagePreset === MESSAGES_AUTO[4] && (
-                  <textarea value={messagePersonnalise}
+                  <textarea
+                    value={messagePersonnalise}
                     onChange={e => setMessagePersonnalise(e.target.value)}
                     placeholder="Votre message personnalisé..."
                     rows={3}
-                    className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm outline-none focus:border-stone-400 resize-none mb-4" />
+                    className="w-full border border-stone-200 bg-white rounded-xl px-4 py-3 text-sm text-stone-700 outline-none focus:border-stone-400 resize-none mb-4 placeholder:text-stone-400"
+                  />
                 )}
                 <div className="flex gap-2">
-                  <button onClick={() => setModeAnnulation(false)}
+                  <button onClick={() => setModeModal('info')}
                     className="flex-1 border border-stone-200 text-stone-600 rounded-xl py-2.5 text-sm hover:bg-stone-50">
                     Retour
                   </button>
@@ -569,28 +778,28 @@ export default function TableauBordSalon() {
             <div className="space-y-3">
               <input type="text" placeholder="Nom du client *" value={nouveauRdv.client_nom}
                 onChange={e => setNouveauRdv({ ...nouveauRdv, client_nom: e.target.value })}
-                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm outline-none focus:border-stone-400" />
+                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 bg-white outline-none focus:border-stone-400 placeholder:text-stone-400" />
               <input type="email" placeholder="Email (optionnel)" value={nouveauRdv.client_email}
                 onChange={e => setNouveauRdv({ ...nouveauRdv, client_email: e.target.value })}
-                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm outline-none focus:border-stone-400" />
+                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 bg-white outline-none focus:border-stone-400 placeholder:text-stone-400" />
               <input type="tel" placeholder="Téléphone (optionnel)" value={nouveauRdv.client_telephone}
                 onChange={e => setNouveauRdv({ ...nouveauRdv, client_telephone: e.target.value })}
-                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm outline-none focus:border-stone-400" />
+                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 bg-white outline-none focus:border-stone-400 placeholder:text-stone-400" />
               <select value={nouveauRdv.service}
                 onChange={e => setNouveauRdv({ ...nouveauRdv, service: e.target.value })}
-                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm outline-none focus:border-stone-400">
+                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 bg-white outline-none focus:border-stone-400">
                 {SERVICES.map(s => <option key={s}>{s}</option>)}
               </select>
               <select value={nouveauRdv.coiffeur_id}
                 onChange={e => setNouveauRdv({ ...nouveauRdv, coiffeur_id: e.target.value })}
-                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm outline-none focus:border-stone-400">
+                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 bg-white outline-none focus:border-stone-400">
                 <option value="">Sans préférence</option>
                 {coiffeurs.map(c => <option key={c.id} value={c.id}>{c.nom}</option>)}
               </select>
               <input type="number" min={15} step={15} value={nouveauRdv.duree_minutes}
                 onChange={e => setNouveauRdv({ ...nouveauRdv, duree_minutes: Number(e.target.value) })}
                 placeholder="Durée (min)"
-                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm outline-none focus:border-stone-400" />
+                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm text-stone-700 bg-white outline-none focus:border-stone-400" />
               <button onClick={ajouterRdvDepuisCalendrier}
                 disabled={!nouveauRdv.client_nom || rdvEnvoi === 'chargement'}
                 className="w-full bg-stone-800 text-white rounded-xl py-3 text-sm font-medium disabled:opacity-40 hover:bg-stone-700 transition-colors">
