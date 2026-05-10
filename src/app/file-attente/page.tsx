@@ -496,6 +496,14 @@ export default function BorneSalon() {
             <button className="btn-main" onClick={inscrire} disabled={!nom.trim() || envoi}>
               {envoi ? 'En cours...' : 'Confirmer'}
             </button>
+              <p className="text-xs text-stone-400 text-center mt-2">
+                En confirmant, vous acceptez nos{' '}
+                <a href="/legal/cgu" target="_blank" className="underline hover:text-stone-600">CGU</a>
+                {' '}et notre{' '}
+                <a href="/legal/politique-confidentialite" target="_blank" className="underline hover:text-stone-600">
+                  politique de confidentialité
+                </a>.
+            </p>
           </div>
         )}
 

@@ -444,6 +444,14 @@ export default function PageReservation() {
                 className="w-full bg-stone-800 text-white rounded-xl py-3 text-sm font-medium disabled:opacity-40 hover:bg-stone-700 transition-colors">
                 {chargement ? 'Envoi en cours...' : 'Confirmer la réservation'}
               </button>
+              <p className="text-xs text-stone-400 text-center mt-2">
+                En confirmant, vous acceptez nos{' '}
+                <a href="/legal/cgu" target="_blank" className="underline hover:text-stone-600">CGU</a>
+                {' '}et notre{' '}
+                <a href="/legal/politique-confidentialite" target="_blank" className="underline hover:text-stone-600">
+                  politique de confidentialité
+                </a>.
+              </p>
             </div>
           </section>
         )}
