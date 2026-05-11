@@ -105,8 +105,8 @@ export default function TableauBordSalon() {
   const joursAffichage = vue === 'semaine' ? joursSemaine : [jourSelectionne]
   const rdvsFiltres = filtreCoiffeur === 'tous' ? rdvs : rdvs.filter(r => r.coiffeur_id === filtreCoiffeur)
 
-const chargerRdvs = useCallback(async () => {
-  setChargement(true)
+const chargerRdvs = useCallback(async (initial = false) => {
+  if (initial) setChargement(true)
 
   let debut: Date, fin: Date
 
@@ -128,17 +128,16 @@ const chargerRdvs = useCallback(async () => {
     .eq('statut', 'confirme')
     .order('date_heure')
   setRdvs(data || [])
-  setChargement(false)
+  if (initial) setChargement(false)
 }, [vue, semaine, jourSelectionne])
 
   useEffect(() => {
-      chargerRdvs()
+      chargerRdvs(true)  // premier chargement avec spinner
       const intervalle = setInterval(() => {
-        if (!document.hidden) { // Seulement si l'onglet est actif
-          chargerRdvs()
+        if (!document.hidden) {
+          chargerRdvs(false)  // refresh silencieux
         }
       }, 30_000)
-
       return () => clearInterval(intervalle)
     }, [chargerRdvs])
 
@@ -337,7 +336,7 @@ const chargerRdvs = useCallback(async () => {
 
           {chargement ? <div className="text-center py-16 text-stone-400 text-sm">Chargement...</div> : (
             <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden">
-              <div className={`grid border-b border-stone-100 ${vue === 'semaine' ? 'grid-cols-8' : 'grid-cols-2'}`}>
+              <div style={{ display:'grid', gridTemplateColumns: vue === 'semaine' ? '52px repeat(7, 1fr)' : '52px 1fr' }}  className="border-b border-stone-100">
                 <div className="py-2 px-3 border-r border-stone-100" />
                 {joursAffichage.map(jour => {
                   const absents = coiffeursAbsents(jour)
@@ -355,7 +354,7 @@ const chargerRdvs = useCallback(async () => {
                 {HEURES.map(heure => {
                   const isHalfHour = heure.endsWith(':30')
                   return (
-                    <div key={heure} className={`grid ${isHalfHour ? 'cal-row-half' : 'cal-row-full'} ${vue === 'semaine' ? 'grid-cols-8' : 'grid-cols-2'}`}>
+                    <div key={heure} className={`${isHalfHour ? 'cal-row-half' : 'cal-row-full'}`} style={{ display:'grid', gridTemplateColumns: vue === 'semaine' ? '52px repeat(7, 1fr)' : '52px 1fr' }}>
                       <div className={`py-2 px-2 border-r border-stone-100 whitespace-nowrap flex items-start ${isHalfHour ? 'opacity-0' : 'cal-time-label'}`}>{heure}</div>
                       {joursAffichage.map(jour => {
                         const rdvsDuCreneau = rdvPourCreneau(jour, heure)
